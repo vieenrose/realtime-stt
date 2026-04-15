@@ -53,10 +53,23 @@ source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
-
-# Install mistral-common (required for Voxtral)
-pip install mistral-common
 ```
+
+### Running the Server
+
+```bash
+# Run with GPU (default)
+python server.py
+
+# Run with CPU (for testing)
+export VOXTRAL_DEVICE=cpu
+python server.py
+
+# Run with custom port
+python -c "from server import run_server; run_server(port=8080)"
+```
+
+Server will be available at `http://localhost:8000` with interactive docs at `/docs`.
 
 ### Model Usage
 
@@ -130,6 +143,20 @@ print(result)  # {"text": "...", "is_final": false, ...}
 ```bash
 pip install edge-tts
 python scripts/download_samples.py --generate
+```
+
+### Quick Test
+
+```bash
+# Test transcription with a sample file
+python -c "
+import librosa
+from voxtral_onnx import VoxtralRealtime, SAMPLE_RATE
+audio, sr = librosa.load('test_samples/english.wav', sr=SAMPLE_RATE)
+model = VoxtralRealtime(device='cuda:0')
+result = model.transcribe(audio, sr)
+print(result['text'])
+"
 ```
 
 ## Benchmarking
@@ -211,6 +238,8 @@ model = VoxtralRealtime(
 - [ ] Traditional Chinese (zh-TW) output (model outputs Simplified)
 
 ## GPU Benchmark Results (NVIDIA GB10 Grace-Blackwell)
+
+Tested on 2026-04-15 with Voxtral-Mini-4B-Realtime-2602:
 
 | Test | Audio | Latency | RTF | Result |
 |------|-------|---------|-----|--------|

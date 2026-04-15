@@ -15,6 +15,12 @@ model/
 # Test samples (generated)
 test_samples/*.wav
 test_samples/*.mp3
+test_samples/*.json
+
+# Temporary test files
+test_audio.wav
+test_short.wav
+test_speech.mp3
 
 # Environment
 .env
