@@ -220,9 +220,10 @@ class VoxtralRealtime:
         audio = self._preprocess_audio(audio, sample_rate)
 
         # Pad audio for proper chunking (right padding)
-        num_right_pad_tokens = self.processor.num_right_pad_tokens
+        # num_right_pad_tokens is a method that needs to be called
+        num_right_pad = self.processor.num_right_pad_tokens()
         raw_audio_length_per_tok = self.processor.raw_audio_length_per_tok
-        audio = np.pad(audio, (0, num_right_pad_tokens * raw_audio_length_per_tok))
+        audio = np.pad(audio, (0, num_right_pad * raw_audio_length_per_tok))
 
         # Prepare first chunk inputs
         num_samples_first = self.processor.num_samples_first_audio_chunk

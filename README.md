@@ -205,7 +205,26 @@ model = VoxtralRealtime(
 - [x] Benchmark script
 - [x] Test sample generator
 - [x] Model working with transformers library
-- [x] English transcription validated
-- [ ] zh-TW/English validation
-- [ ] Performance optimization for DGX Spark (needs GPU)
-- [ ] ONNX model integration (optional)
+- [x] GPU acceleration working (NVIDIA GB10)
+- [x] Streaming transcription working
+- [x] Chinese-English code-switching validated
+- [ ] Traditional Chinese (zh-TW) output (model outputs Simplified)
+
+## GPU Benchmark Results (NVIDIA GB10 Grace-Blackwell)
+
+| Test | Audio | Latency | RTF | Result |
+|------|-------|---------|-----|--------|
+| English (20s) | Obama speech | 16s | 0.799 | ✓ Faster than realtime |
+| Chinese (5s) | TTS sample | 4.8s | 0.96 | ✓ Faster than realtime |
+| Mixed (7s) | zh+EN code-switch | 5.7s | 0.79 | ✓ Handles both languages |
+| Streaming (30s) | Live transcription | 24s | 0.81 | ✓ First text at ~1.9s |
+
+### Chinese-English Code-Switching Test
+
+**Input (Traditional Chinese + English):**
+> 我喜歡用 Python programming language 來開發 software applications。Today is a good day for coding。
+
+**Output (Simplified Chinese + English):**
+> 我喜欢用Python programming language来开发software applicationsToday is a good day for coding
+
+Note: Model outputs Simplified Chinese characters (zh) instead of Traditional (zh-TW). This is expected as Voxtral supports "zh" language.

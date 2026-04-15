@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import os
 import json
 from pathlib import Path
@@ -46,9 +47,9 @@ SAMPLE_CONFIG = {
 }
 
 
-def generate_with_tts(prompt: str, output_path: str, language: str = "zh-TW"):
+async def generate_with_tts_async(prompt: str, output_path: str, language: str = "zh-TW"):
     """
-    Generate test audio using TTS.
+    Generate test audio using TTS (async version).
 
     Uses edge-tts (Microsoft Edge TTS, free) as default.
     """
@@ -71,10 +72,15 @@ def generate_with_tts(prompt: str, output_path: str, language: str = "zh-TW"):
     print(f"Prompt: {prompt}")
 
     communicate = edge_tts.Communicate(prompt, voice)
-    communicate.save(output_path)
+    await communicate.save(output_path)
 
     print(f"Saved: {output_path}")
     return True
+
+
+def generate_with_tts(prompt: str, output_path: str, language: str = "zh-TW"):
+    """Wrapper for async TTS generation."""
+    return asyncio.run(generate_with_tts_async(prompt, output_path, language))
 
 
 def download_common_voice(language: str, output_dir: str):
