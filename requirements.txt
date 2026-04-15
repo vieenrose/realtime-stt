@@ -1,0 +1,21 @@
+# Core ONNX Runtime
+# Note: onnxruntime-gpu may not be available on aarch64
+# For CUDA GPU support on DGX Spark (Grace-Blackwell), use appropriate variant
+onnxruntime>=1.17.0
+# Alternative for GPU: onnxruntime-gpu (x86_64 only) or build from source
+
+# API Server
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+python-multipart>=0.0.6
+
+# Audio Processing
+numpy>=1.24.0
+soundfile>=0.12.0
+librosa>=0.10.0
+
+# Model Download
+huggingface_hub>=0.20.0
+
+# Optional: GPU Memory Monitoring
+# pynvml>=11.0.0

@@ -1,0 +1,31 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Model files (large, download separately)
+model/
+
+# Test samples (generated)
+test_samples/*.wav
+test_samples/*.mp3
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Benchmark results
+results.json
