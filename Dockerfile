@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.4-cudnn-runtime-ubuntu22.04
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 WORKDIR /app
 
@@ -15,9 +15,11 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download model at build time
+# Download model at build time with optional HF token (Transformers model, not ONNX)
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
 RUN pip install huggingface_hub && \
-    hf download onnx-community/Voxtral-Mini-4B-Realtime-2602-ONNX --local-dir /model
+    hf download mistralai/Voxtral-Mini-4B-Realtime-2602 --local-dir /model --token "$HF_TOKEN"
 
 # Copy application code
 COPY voxtral_onnx.py .

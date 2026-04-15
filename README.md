@@ -88,8 +88,14 @@ python server.py
 ### Docker Build
 
 ```bash
-docker build -t voxtral-stt .
-docker run --gpus all -p 8000:8000 voxtral-stt
+docker build -t realtime-stt-dgx-spark .
+docker run --gpus all -p 8000:8000 realtime-stt-dgx-spark
+```
+
+Or use the pre-built image from DockerHub:
+```bash
+docker pull luigiliutw/realtime-stt-dgx-spark:latest
+docker run --gpus all -p 8000:8000 luigiliutw/realtime-stt-dgx-spark:latest
 ```
 
 ## API Endpoints
@@ -173,11 +179,22 @@ Metrics tracked:
 
 ## Model Details
 
-- **Model**: [Voxtral-Mini-4B-Realtime-2602-ONNX](https://huggingface.co/onnx-community/Voxtral-Mini-4B-Realtime-2602-ONNX)
+- **Model**: [Voxtral-Mini-4B-Realtime-2602](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602)
 - **Parameters**: ~4B (3.4B LLM + 970M audio encoder)
 - **Architecture**: Natively streaming ASR with causal audio encoder
 - **Latency**: 480ms default (configurable: 80ms-2400ms)
 - **License**: Apache 2.0
+
+## Docker Hub
+
+Pre-built Docker image available:
+
+```bash
+docker pull luigiliutw/realtime-stt-dgx-spark:latest
+docker run --gpus all -p 8000:8000 luigiliutw/realtime-stt-dgx-spark:latest
+```
+
+- **Image**: [luigiliutw/realtime-stt-dgx-spark](https://hub.docker.com/r/luigiliutw/realtime-stt-dgx-spark)
 
 ## Technical Notes
 
@@ -221,8 +238,8 @@ model = VoxtralRealtime(
 ## References
 
 - [Voxtral Paper](https://arxiv.org/abs/2602.11298)
-- [ONNX Runtime Documentation](https://onnxruntime.ai/docs/)
-- [HuggingFace Model Card](https://huggingface.co/onnx-community/Voxtral-Mini-4B-Realtime-2602-ONNX)
+- [HuggingFace Model Card](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602)
+- [DockerHub Image](https://hub.docker.com/r/luigiliutw/realtime-stt-dgx-spark)
 
 ## Status
 
