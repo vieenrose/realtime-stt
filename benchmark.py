@@ -26,11 +26,11 @@ except ImportError:
     print("Please install soundfile: pip install soundfile")
     exit(1)
 
-from voxtral_onnx import VoxtralONNX, SAMPLE_RATE
+from voxtral_onnx import VoxtralRealtime, SAMPLE_RATE
 
 
 def benchmark_transcription(
-    model: VoxtralONNX,
+    model: VoxtralRealtime,
     audio: np.ndarray,
     sample_rate: int,
     iterations: int = 10
@@ -95,7 +95,7 @@ def benchmark_transcription(
 
 
 def benchmark_streaming(
-    model: VoxtralONNX,
+    model: VoxtralRealtime,
     audio: np.ndarray,
     chunk_size_ms: int = 480
 ) -> Dict[str, Any]:
@@ -168,7 +168,7 @@ def benchmark_memory():
         print(f"GPU memory before: {mem_before.used / 1024**2:.2f} MB used")
 
         # Load model
-        model = VoxtralONNX()
+        model = VoxtralRealtime()
 
         # Get memory info after loading model
         mem_after = pynvml.nvmlDeviceGetMemoryInfo(handle)
@@ -233,8 +233,20 @@ def main():
         help="Number of benchmark iterations"
     )
     parser.add_argument(
-        "--model-path", type=str, default="./model",
-        help="Path to ONNX model directory"
+        "--model-id", type=str, default="mistralai/Voxtral-Mini-4B-Realtime-2602",
+        help="HuggingFace model ID"
+    )
+    parser.add_argument(
+        "--onnx-model-path", type=str, default="./model",
+        help="Path to ONNX model directory (alternative to model-id)"
+    )
+    parser.add_argument(
+        "--use-onnx", action="store_true",
+        help="Use local ONNX model instead of downloading"
+    )
+    parser.add_argument(
+        "--device", type=str, default="cuda:0",
+        help="Device for inference (cuda:0, cpu, etc.)"
     )
     parser.add_argument(
         "--streaming", action="store_true",
@@ -277,8 +289,20 @@ def main():
         return
 
     # Initialize model
-    print(f"\nLoading model from: {args.model_path}")
-    model = VoxtralONNX(args.model_path)
+    print(f"\nLoading model...")
+    if args.use_onnx:
+        print(f"Using ONNX model from: {args.onnx_model_path}")
+        model = VoxtralRealtime(
+            use_onnx=True,
+            onnx_model_path=args.onnx_model_path,
+            device=args.device
+        )
+    else:
+        print(f"Downloading/using model: {args.model_id}")
+        model = VoxtralRealtime(
+            model_id=args.model_id,
+            device=args.device
+        )
     model_info = model.get_model_info()
     print(f"Model info: {json.dumps(model_info, indent=2)}")
 

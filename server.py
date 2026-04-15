@@ -2,7 +2,7 @@
 Voxtral STT FastAPI Server
 
 Provides HTTP and WebSocket endpoints for real-time speech-to-text
-transcription using Voxtral Mini Realtime ONNX model with CUDA acceleration.
+transcription using Voxtral Mini Realtime model with CUDA acceleration.
 
 Endpoints:
 - POST /transcribe - Upload audio file for transcription
@@ -32,12 +32,12 @@ try:
 except ImportError:
     librosa = None
 
-from voxtral_onnx import VoxtralONNX, SAMPLE_RATE
+from voxtral_onnx import VoxtralRealtime, SAMPLE_RATE
 
 # Create FastAPI app
 app = FastAPI(
     title="Voxtral STT API",
-    description="Real-time speech-to-text transcription using Voxtral Mini Realtime ONNX",
+    description="Real-time speech-to-text transcription using Voxtral Mini Realtime",
     version="1.0.0",
 )
 
@@ -51,15 +51,22 @@ app.add_middleware(
 )
 
 # Global model instance (lazy loaded)
-_model: Optional[VoxtralONNX] = None
+_model: Optional[VoxtralRealtime] = None
 
 
-def get_model() -> VoxtralONNX:
+def get_model() -> VoxtralRealtime:
     """Get or initialize the global model instance."""
     global _model
     if _model is None:
-        model_path = os.environ.get("VOXTRAL_MODEL_PATH", "./model")
-        _model = VoxtralONNX(model_path)
+        model_id = os.environ.get("VOXTRAL_MODEL_ID", "mistralai/Voxtral-Mini-4B-Realtime-2602")
+        device = os.environ.get("VOXTRAL_DEVICE", "cuda:0")
+        use_onnx = os.environ.get("VOXTRAL_USE_ONNX", "false").lower() == "true"
+        onnx_path = os.environ.get("VOXTRAL_ONNX_PATH", "./model")
+
+        if use_onnx:
+            _model = VoxtralRealtime(use_onnx=True, onnx_model_path=onnx_path, device=device)
+        else:
+            _model = VoxtralRealtime(model_id=model_id, device=device)
     return _model
 
 
@@ -231,15 +238,15 @@ async def health_check():
     """
     Health check endpoint.
 
-    Returns status and GPU availability.
+    Returns status and device information.
     """
     try:
         model = get_model()
         model_info = model.get_model_info()
         return {
             "status": "ok",
-            "gpu_available": "CUDAExecutionProvider" in model_info["providers"],
-            "providers": model_info["providers"],
+            "device": model_info["device"],
+            "model_id": model_info["model_id"],
         }
     except Exception as e:
         return {

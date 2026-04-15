@@ -1,392 +1,310 @@
 """
-Voxtral Mini Realtime ONNX Model Wrapper
+Voxtral Mini Realtime Model Wrapper
 
-This module provides a wrapper for running Voxtral Mini Realtime 2602 ONNX
-model with CUDA acceleration for real-time speech-to-text transcription.
+This module provides a wrapper for running Voxtral Mini Realtime 2602 model
+for real-time speech-to-text transcription using HuggingFace Transformers.
 
 The model architecture consists of:
-1. Audio encoder (~970M params) - processes 16kHz audio into features
-2. Decoder (~3.4B params) - generates text tokens from audio features
+1. Audio encoder (~970M params) - causal audio encoder for streaming
+2. Decoder (~3.4B params) - Mistral-based language model for text generation
 
-Key parameters from config:
-- num_mel_bins: 128 (audio feature dimension)
-- audio_length_per_tok: 8 (each token = 80ms audio)
-- default_num_delay_tokens: 6 (480ms delay)
-- vocab_size: 131072 (Mistral tokenizer)
-- bos_token_id: 1, eos_token_id: 2
+Key features:
+- Natively streaming architecture with configurable delay (80ms-2400ms)
+- Supports 13 languages including Chinese (zh) and English
+- Uses KV cache for efficient incremental inference
 """
 
 import os
-import json
 import numpy as np
+from typing import Optional, Dict, Any, AsyncIterable, Generator
 from pathlib import Path
-from typing import Optional, Dict, Any, AsyncIterable
+from threading import Thread
 
 try:
-    import onnxruntime as ort
+    import torch
+    from transformers import (
+        VoxtralRealtimeProcessor,
+        VoxtralRealtimeForConditionalGeneration,
+        TextIteratorStreamer,
+    )
 except ImportError:
-    raise ImportError("Please install onnxruntime or onnxruntime-gpu: pip install onnxruntime-gpu")
+    raise ImportError(
+        "Please install transformers and torch: "
+        "pip install transformers accelerate torch"
+    )
 
 
-# Audio constants
+# Audio constants from model config
 SAMPLE_RATE = 16000
 NUM_MEL_BINS = 128
 HOP_LENGTH = 160  # 10ms at 16kHz
 WIN_LENGTH = 400  # 25ms at 16kHz
-CHUNK_SIZE_MS = 480  # Default transcription delay
-CHUNK_SIZE_SAMPLES = int(SAMPLE_RATE * CHUNK_SIZE_MS / 1000)  # 7680 samples
+DEFAULT_DELAY_MS = 480  # Sweet spot for accuracy/latency
 
 
-class VoxtralONNX:
-    """Voxtral Mini Realtime ONNX wrapper with CUDA acceleration."""
+class VoxtralRealtime:
+    """Voxtral Mini Realtime model wrapper for streaming transcription."""
 
     def __init__(
         self,
-        model_path: str = "./model",
-        use_quantized: bool = False,
-        use_fp16: bool = True,
-        device_id: int = 0,
-        transcription_delay_ms: int = 480
+        model_id: str = "mistralai/Voxtral-Mini-4B-Realtime-2602",
+        device: str = "cuda:0",
+        transcription_delay_ms: int = 480,
+        use_onnx: bool = False,
+        onnx_model_path: Optional[str] = None
     ):
         """
-        Initialize Voxtral ONNX model.
+        Initialize Voxtral Realtime model.
 
         Args:
-            model_path: Path to the model directory containing ONNX files
-            use_quantized: Use quantized model variant for lower memory
-            use_fp16: Use FP16 model variant for faster inference
-            device_id: CUDA device ID (0 by default)
-            transcription_delay_ms: Transcription delay in ms (80-2400, multiples of 80)
+            model_id: HuggingFace model ID
+            device: Device to run on (cuda:0, cpu, etc.)
+            transcription_delay_ms: Delay in ms (80-2400, multiples of 80)
+            use_onnx: Whether to use ONNX model variant
+            onnx_model_path: Path to ONNX model directory (if use_onnx=True)
         """
-        self.model_path = Path(model_path)
+        self.model_id = model_id
+        self.device = device
         self.transcription_delay_ms = transcription_delay_ms
 
-        # Load config
-        config_path = self.model_path / "config.json"
-        if config_path.exists():
-            with open(config_path) as f:
-                self.config = json.load(f)
+        if use_onnx and onnx_model_path:
+            self.model_id = onnx_model_path
+
+        # Load processor and model
+        self._load_model()
+
+        # Streaming state
+        self._reset_state()
+
+    def _load_model(self):
+        """Load processor and model."""
+        print(f"Loading model from: {self.model_id}")
+
+        self.processor = VoxtralRealtimeProcessor.from_pretrained(self.model_id)
+
+        # Determine dtype based on device
+        if self.device.startswith("cuda"):
+            dtype = torch.bfloat16
         else:
-            self.config = {}
+            dtype = torch.float32
 
-        # Select model variant based on options
-        onnx_dir = self.model_path / "onnx"
-
-        # Audio encoder selection
-        if use_quantized:
-            encoder_name = "audio_encoder_q4f16.onnx" if use_fp16 else "audio_encoder_q4.onnx"
-        elif use_fp16:
-            encoder_name = "audio_encoder_fp16.onnx"
-        else:
-            encoder_name = "audio_encoder.onnx"
-
-        # Decoder selection (use merged model for end-to-end)
-        if use_quantized:
-            decoder_name = "decoder_model_merged_q4f16.onnx" if use_fp16 else "decoder_model_merged_q4.onnx"
-        elif use_fp16:
-            decoder_name = "decoder_model_merged_fp16.onnx"
-        else:
-            decoder_name = "decoder_model_merged.onnx"
-
-        encoder_path = onnx_dir / encoder_name
-        decoder_path = onnx_dir / decoder_name
-
-        # Fallback to base models if variants don't exist
-        if not encoder_path.exists():
-            encoder_path = onnx_dir / "audio_encoder.onnx"
-        if not decoder_path.exists():
-            decoder_path = onnx_dir / "decoder_model_merged.onnx"
-
-        # Configure execution providers
-        providers = [
-            ('CUDAExecutionProvider', {
-                'device_id': device_id,
-                'arena_extend_strategy': 'kNextPowerOfTwo',
-                'gpu_mem_limit': 2 * 1024 * 1024 * 1024,  # 2GB limit per session
-                'cudnn_conv_algo_search': 'EXHAUSTIVE',
-                'do_copy_in_default_stream': True,
-            }),
-            'CPUExecutionProvider'
-        ]
-
-        # Create sessions
-        sess_options = ort.SessionOptions()
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-
-        self.encoder_session = ort.InferenceSession(
-            str(encoder_path),
-            sess_options=sess_options,
-            providers=providers
+        self.model = VoxtralRealtimeForConditionalGeneration.from_pretrained(
+            self.model_id,
+            device_map=self.device,
+            torch_dtype=dtype
         )
 
-        # Note: decoder_model_merged combines encoder projection + decoder
-        # For standalone transcription, we may only need this model
-        self.decoder_session = ort.InferenceSession(
-            str(decoder_path),
-            sess_options=sess_options,
-            providers=providers
-        )
+        print(f"Model loaded on {self.device}")
 
-        # Get input/output info from sessions
-        self._input_names = self._get_input_info()
-        self._output_names = self._get_output_info()
-
-        # Initialize tokenizer (we'll need to handle token decoding)
-        self._init_tokenizer()
-
-        # State for streaming
-        self._buffer = np.zeros(0, dtype=np.float32)
-        self._generated_tokens = []
-
-    def _get_input_info(self) -> Dict[str, Any]:
-        """Extract input tensor names and shapes from encoder session."""
-        inputs = {}
-        for inp in self.encoder_session.get_inputs():
-            inputs[inp.name] = {
-                'shape': inp.shape,
-                'type': inp.type
-            }
-        return inputs
-
-    def _get_output_info(self) -> Dict[str, Any]:
-        """Extract output tensor names and shapes from encoder session."""
-        outputs = {}
-        for out in self.encoder_session.get_outputs():
-            outputs[out.name] = {
-                'shape': out.shape,
-                'type': out.type
-            }
-        return outputs
-
-    def _init_tokenizer(self):
-        """Initialize tokenizer for decoding output tokens."""
-        # Voxtral uses Mistral tokenizer (vocab_size: 131072)
-        # For ONNX models, tokenizer is usually embedded or needs external vocab
-        # We'll need to find tekken.json or similar in the model directory
-
-        tokenizer_path = self.model_path / "tekken.json"
-        if tokenizer_path.exists():
-            with open(tokenizer_path) as f:
-                self.tokenizer_config = json.load(f)
-        else:
-            # Fallback: tokenizer info from generation_config
-            self.tokenizer_config = {
-                'bos_token_id': 1,
-                'eos_token_id': 2,
-                'pad_token_id': 11
-            }
+    def _reset_state(self):
+        """Reset streaming state."""
+        self._audio_buffer = np.zeros(0, dtype=np.float32)
+        self._is_first_chunk = True
 
     def _preprocess_audio(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
         """
         Preprocess audio to model's expected format.
 
         Args:
-            audio: Input audio waveform (float32)
+            audio: Input audio waveform
             sample_rate: Input sample rate
 
         Returns:
-            Preprocessed audio features (mel spectrogram or raw waveform)
+            Preprocessed audio at 16kHz
         """
         # Resample to 16kHz if needed
         if sample_rate != SAMPLE_RATE:
-            # Simple linear resampling (for production, use librosa.resample)
-            ratio = SAMPLE_RATE / sample_rate
-            new_length = int(len(audio) * ratio)
-            audio = np.interp(
-                np.linspace(0, len(audio), new_length),
-                np.arange(len(audio)),
-                audio
-            ).astype(np.float32)
+            try:
+                import librosa
+                audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=SAMPLE_RATE)
+            except ImportError:
+                # Simple linear resampling fallback
+                ratio = SAMPLE_RATE / sample_rate
+                new_length = int(len(audio) * ratio)
+                audio = np.interp(
+                    np.linspace(0, len(audio), new_length),
+                    np.arange(len(audio)),
+                    audio
+                ).astype(np.float32)
 
-        # Normalize audio
+        # Ensure float32
         if audio.dtype != np.float32:
             audio = audio.astype(np.float32)
 
-        # Normalize to [-1, 1] range
+        # Normalize to [-1, 1]
         max_val = np.max(np.abs(audio))
-        if max_val > 0:
+        if max_val > 1.0:
             audio = audio / max_val
 
         return audio
-
-    def _compute_mel_features(self, audio: np.ndarray) -> np.ndarray:
-        """
-        Compute mel spectrogram features from audio.
-
-        This matches Voxtral's audio encoder preprocessing.
-        """
-        try:
-            import librosa
-        except ImportError:
-            raise ImportError("Please install librosa: pip install librosa")
-
-        # Compute mel spectrogram
-        mel = librosa.feature.melspectrogram(
-            y=audio,
-            sr=SAMPLE_RATE,
-            n_mels=NUM_MEL_BINS,
-            hop_length=HOP_LENGTH,
-            win_length=WIN_LENGTH,
-            fmin=0,
-            fmax=SAMPLE_RATE // 2
-        )
-
-        # Convert to log scale
-        mel = librosa.power_to_db(mel, ref=np.max)
-
-        # Normalize
-        mel = (mel - mel.mean()) / (mel.std() + 1e-8)
-
-        return mel.astype(np.float32)
 
     def transcribe(
         self,
         audio: np.ndarray,
         sample_rate: int = 16000,
         language: Optional[str] = None,
-        return_timestamps: bool = False
+        max_new_tokens: int = 512
     ) -> Dict[str, Any]:
         """
-        Transcribe audio to text.
+        Transcribe audio to text (non-streaming).
 
         Args:
-            audio: Audio waveform (float32, any sample rate)
-            sample_rate: Audio sample rate (will resample if not 16kHz)
+            audio: Audio waveform
+            sample_rate: Audio sample rate
             language: Target language hint (auto-detected if None)
-            return_timestamps: Whether to return word timestamps
+            max_new_tokens: Maximum tokens to generate
 
         Returns:
-            dict with 'text', 'language', 'confidence', and optionally 'timestamps'
+            dict with 'text', 'language', 'confidence', 'audio_duration'
         """
         # Preprocess audio
         audio = self._preprocess_audio(audio, sample_rate)
+        audio_duration = len(audio) / SAMPLE_RATE
 
-        # Compute mel features
-        mel_features = self._compute_mel_features(audio)
+        # Prepare inputs
+        inputs = self.processor(
+            audio=audio,
+            is_streaming=False,
+            return_tensors="pt"
+        )
+        inputs = inputs.to(self.model.device, dtype=self.model.dtype)
 
-        # Prepare inputs for ONNX inference
-        # The exact input names depend on the model structure
-        # Typical inputs: input_features, attention_mask, etc.
-
-        # Add batch dimension
-        mel_features = mel_features[np.newaxis, ...]  # [1, n_mels, time]
-
-        # Transpose to expected format [batch, time, features] or [batch, features, time]
-        # Voxtral expects [batch, time, features]
-        mel_features = mel_features.transpose(0, 2, 1)
-
-        # Create attention mask (all ones for valid audio)
-        attention_mask = np.ones(mel_features.shape[:2], dtype=np.int64)
-
-        # Run encoder
-        try:
-            encoder_inputs = {
-                'input_features': mel_features,
-                'attention_mask': attention_mask
-            }
-            encoder_outputs = self.encoder_session.run(None, encoder_inputs)
-        except Exception as e:
-            # Try alternative input names
-            # Some ONNX exports use different naming
-            input_name = self.encoder_session.get_inputs()[0].name
-            encoder_inputs = {input_name: mel_features}
-            encoder_outputs = self.encoder_session.run(None, encoder_inputs)
-
-        # Encoder outputs contain audio embeddings
-        audio_embeds = encoder_outputs[0]
-
-        # Run decoder with audio embeddings
-        # The merged decoder handles the full transcription loop
-        decoder_inputs = {
-            'audio_embeds': audio_embeds,
-            'attention_mask': attention_mask,
-            'max_length': np.array([512], dtype=np.int64),
-            'min_length': np.array([1], dtype=np.int64),
-        }
-
-        try:
-            decoder_outputs = self.decoder_session.run(None, decoder_inputs)
-        except Exception as e:
-            # Simplified inference with just audio features
-            decoder_input_name = self.decoder_session.get_inputs()[0].name
-            decoder_outputs = self.decoder_session.run(
-                None,
-                {decoder_input_name: audio_embeds}
+        # Generate
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=0.0  # Recommended for transcription
             )
 
-        # Decode output tokens to text
-        # Output format: [batch, sequence_length] containing token IDs
-        output_tokens = decoder_outputs[0]
+        # Decode
+        # Skip the input tokens, only decode generated tokens
+        generated_tokens = outputs[:, inputs.input_ids.shape[1]:]
+        text = self.processor.batch_decode(
+            generated_tokens,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True
+        )[0]
 
-        # Decode tokens
-        text = self._decode_tokens(output_tokens[0])
-
-        # Detect language (simplified - actual implementation would use model output)
+        # Detect language from text
         detected_lang = self._detect_language(text) if language is None else language
 
         return {
             'text': text,
             'language': detected_lang,
-            'confidence': 0.95,  # Placeholder
+            'confidence': 0.95,
+            'audio_duration': audio_duration
         }
 
-    def _decode_tokens(self, tokens: np.ndarray) -> str:
+    def transcribe_streaming(
+        self,
+        audio: np.ndarray,
+        sample_rate: int = 16000,
+        chunk_callback: Optional[callable] = None
+    ) -> str:
         """
-        Decode token IDs to text string.
+        Stream transcription of audio with incremental text output.
+
+        This uses the streaming architecture with KV cache for efficient
+        incremental inference.
 
         Args:
-            tokens: Array of token IDs
+            audio: Full audio waveform
+            sample_rate: Audio sample rate
+            chunk_callback: Optional callback for each text chunk
 
         Returns:
-            Decoded text string
+            Full transcribed text
         """
-        # Find EOS token and truncate
-        eos_id = self.tokenizer_config.get('eos_token_id', 2)
-        eos_positions = np.where(tokens == eos_id)[0]
-        if len(eos_positions) > 0:
-            tokens = tokens[:eos_positions[0]]
+        # Preprocess audio
+        audio = self._preprocess_audio(audio, sample_rate)
 
-        # Remove BOS token
-        bos_id = self.tokenizer_config.get('bos_token_id', 1)
-        tokens = tokens[tokens != bos_id]
+        # Pad audio for proper chunking (right padding)
+        num_right_pad_tokens = self.processor.num_right_pad_tokens
+        raw_audio_length_per_tok = self.processor.raw_audio_length_per_tok
+        audio = np.pad(audio, (0, num_right_pad_tokens * raw_audio_length_per_tok))
 
-        # Remove padding
-        pad_id = self.tokenizer_config.get('pad_token_id', 11)
-        tokens = tokens[tokens != pad_id]
+        # Prepare first chunk inputs
+        num_samples_first = self.processor.num_samples_first_audio_chunk
+        first_chunk_inputs = self.processor(
+            audio[:num_samples_first],
+            is_streaming=True,
+            is_first_audio_chunk=True,
+            return_tensors="pt"
+        )
+        first_chunk_inputs = first_chunk_inputs.to(
+            self.model.device, dtype=self.model.dtype
+        )
 
-        # For full implementation, we need the actual vocabulary mapping
-        # This requires tekken.json or similar tokenizer file
-        # For now, return placeholder (actual decoding needs vocab lookup)
+        # Create input features generator
+        def input_features_generator():
+            yield first_chunk_inputs.input_features
 
-        if len(tokens) == 0:
-            return ""
+            mel_frame_idx = self.processor.num_mel_frames_first_audio_chunk
+            hop_length = self.processor.feature_extractor.hop_length
+            win_length = self.processor.feature_extractor.win_length
 
-        # Placeholder: indicate that token decoding requires vocab
-        return f"[tokens: {len(tokens)}]"
+            start_idx = mel_frame_idx * hop_length - win_length // 2
+            num_samples_per_chunk = self.processor.num_samples_per_audio_chunk
 
-    def _detect_language(self, text: str) -> str:
-        """Detect language from text content."""
-        # Simplified language detection
-        # Check for Chinese characters
-        chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
-        if chinese_chars > len(text) * 0.3:
-            return 'zh'
-        return 'en'
+            while (end_idx := start_idx + num_samples_per_chunk) < audio.shape[0]:
+                chunk = audio[start_idx:end_idx]
+                inputs = self.processor(
+                    chunk,
+                    is_streaming=True,
+                    is_first_audio_chunk=False,
+                    return_tensors="pt"
+                )
+                inputs = inputs.to(self.model.device, dtype=self.model.dtype)
+                yield inputs.input_features
 
-    def transcribe_stream(
+                mel_frame_idx += self.processor.audio_length_per_tok
+                start_idx = mel_frame_idx * hop_length - win_length // 2
+
+        # Create streamer for text output
+        streamer = TextIteratorStreamer(
+            self.processor.tokenizer,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=True
+        )
+
+        # Run generation in thread
+        generate_kwargs = {
+            "input_ids": first_chunk_inputs.input_ids,
+            "input_features": input_features_generator(),
+            "num_delay_tokens": first_chunk_inputs.num_delay_tokens,
+            "streamer": streamer,
+            "temperature": 0.0,
+        }
+
+        thread = Thread(target=self.model.generate, kwargs=generate_kwargs)
+        thread.start()
+
+        # Collect streaming output
+        full_text = ""
+        for text_chunk in streamer:
+            if chunk_callback:
+                chunk_callback(text_chunk)
+            full_text += text_chunk
+            print(text_chunk, end="", flush=True)  # Live output
+
+        thread.join()
+        return full_text
+
+    async def transcribe_stream(
         self,
         audio_chunks: AsyncIterable[np.ndarray],
-        chunk_size_ms: int = CHUNK_SIZE_MS
+        chunk_size_ms: int = DEFAULT_DELAY_MS
     ) -> AsyncIterable[Dict[str, Any]]:
         """
-        Streaming transcription for real-time use.
+        Async streaming transcription for real-time use.
 
         Args:
             audio_chunks: Async iterable of audio chunks
-            chunk_size_ms: Size of chunks for inference (default 480ms)
+            chunk_size_ms: Size of chunks for inference
 
         Yields:
-            Partial transcription results
+            Partial transcription results with 'text', 'is_final', 'language'
         """
         chunk_samples = int(SAMPLE_RATE * chunk_size_ms / 1000)
         buffer = []
@@ -394,12 +312,10 @@ class VoxtralONNX:
         async for chunk in audio_chunks:
             buffer.extend(chunk)
 
-            # Process when buffer reaches chunk size
             while len(buffer) >= chunk_samples:
                 audio_chunk = np.array(buffer[:chunk_samples], dtype=np.float32)
                 buffer = buffer[chunk_samples:]
 
-                # Transcribe chunk
                 result = self.transcribe(audio_chunk, SAMPLE_RATE)
                 result['is_final'] = False
                 yield result
@@ -413,30 +329,48 @@ class VoxtralONNX:
 
     def reset_stream(self):
         """Reset streaming state for new utterance."""
-        self._buffer = np.zeros(0, dtype=np.float32)
-        self._generated_tokens = []
+        self._reset_state()
+
+    def _detect_language(self, text: str) -> str:
+        """Detect language from text content."""
+        # Check for Chinese characters
+        chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+        if chinese_chars > len(text) * 0.3:
+            return 'zh'
+        return 'en'
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get model information and capabilities."""
         return {
-            'model_name': 'Voxtral-Mini-4B-Realtime-2602-ONNX',
+            'model_name': 'Voxtral-Mini-4B-Realtime-2602',
+            'model_id': self.model_id,
             'languages': ['en', 'fr', 'es', 'de', 'ru', 'zh', 'ja', 'it', 'pt', 'nl', 'ar', 'hi', 'ko'],
             'sample_rate': SAMPLE_RATE,
             'transcription_delay_ms': self.transcription_delay_ms,
-            'encoder_inputs': self._input_names,
-            'encoder_outputs': self._output_names,
-            'providers': self.encoder_session.get_providers(),
+            'device': self.device,
+            'processor_config': {
+                'num_mel_bins': self.processor.feature_extractor.feature_size if hasattr(self.processor.feature_extractor, 'feature_size') else NUM_MEL_BINS,
+                'hop_length': self.processor.feature_extractor.hop_length if hasattr(self.processor.feature_extractor, 'hop_length') else HOP_LENGTH,
+            }
         }
 
 
-# Convenience function for quick transcription
-def transcribe_file(audio_path: str, model_path: str = "./model") -> Dict[str, Any]:
+# Alias for backwards compatibility
+VoxtralONNX = VoxtralRealtime
+
+
+def transcribe_file(
+    audio_path: str,
+    model_id: str = "mistralai/Voxtral-Mini-4B-Realtime-2602",
+    device: str = "cuda:0"
+) -> Dict[str, Any]:
     """
     Transcribe an audio file.
 
     Args:
-        audio_path: Path to audio file (wav, mp3, etc.)
-        model_path: Path to ONNX model directory
+        audio_path: Path to audio file
+        model_id: Model ID to use
+        device: Device for inference
 
     Returns:
         Transcription result dict
@@ -446,15 +380,11 @@ def transcribe_file(audio_path: str, model_path: str = "./model") -> Dict[str, A
     except ImportError:
         raise ImportError("Please install soundfile: pip install soundfile")
 
-    # Load audio
     audio, sr = sf.read(audio_path)
 
     # Convert to mono if stereo
     if len(audio.shape) > 1:
         audio = audio.mean(axis=1)
 
-    # Initialize model
-    model = VoxtralONNX(model_path)
-
-    # Transcribe
+    model = VoxtralRealtime(model_id=model_id, device=device)
     return model.transcribe(audio, sr)

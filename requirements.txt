@@ -1,8 +1,8 @@
-# Core ONNX Runtime
-# Note: onnxruntime-gpu may not be available on aarch64
-# For CUDA GPU support on DGX Spark (Grace-Blackwell), use appropriate variant
-onnxruntime>=1.17.0
-# Alternative for GPU: onnxruntime-gpu (x86_64 only) or build from source
+# Core Transformers Library
+transformers>=5.5.0
+torch>=2.0.0
+accelerate>=0.20.0
+mistral-common>=1.11.0
 
 # API Server
 fastapi>=0.100.0
@@ -17,5 +17,14 @@ librosa>=0.10.0
 # Model Download
 huggingface_hub>=0.20.0
 
+# Optional: ONNX Runtime (for ONNX variant)
+onnxruntime>=1.17.0
+
 # Optional: GPU Memory Monitoring
 # pynvml>=11.0.0
+
+# Optional: Test samples generation
+# edge-tts>=6.1.0
+
+# Optional: Benchmark datasets
+# datasets>=2.0.0

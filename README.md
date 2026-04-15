@@ -1,6 +1,6 @@
 # Voxtral Mini Realtime STT Service
 
-Real-time speech-to-text transcription service using Voxtral Mini 4B Realtime 2602 ONNX model with CUDA GPU acceleration.
+Real-time speech-to-text transcription service using Voxtral Mini 4B Realtime 2602 model with CUDA GPU acceleration.
 
 ## Overview
 
@@ -20,8 +20,9 @@ This project provides a FastAPI-based transcription service optimized for NVIDIA
                               │
                               ▼
                         ┌──────────────────┐
-                        │  Voxtral ONNX    │
-                        │  (CUDA GPU)      │
+                        │  Voxtral Model   │
+                        │  (HuggingFace    │
+                        │   Transformers)  │
                         └──────────────────┘
 ```
 
@@ -32,13 +33,13 @@ voxtral-stt/
 ├── CLAUDE.md           # Project guidance for Claude Code
 ├── Dockerfile          # CUDA-enabled container
 ├── requirements.txt    # Python dependencies
-├── voxtral_onnx.py     # ONNX model wrapper
+├── voxtral_onnx.py     # Voxtral model wrapper (transformers-based)
 ├── server.py           # FastAPI server with endpoints
 ├── benchmark.py        # Performance measurement script
 ├── scripts/
 │   └── download_samples.py  # TTS test sample generator
 ├── test_samples/       # Directory for test audio files
-└── model/              # Voxtral ONNX model (downloaded)
+└── model/              # Voxtral ONNX model (optional, for ONNX variant)
 ```
 
 ## Installation
@@ -53,8 +54,22 @@ source .venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Download model
-hf download onnx-community/Voxtral-Mini-4B-Realtime-2602-ONNX --local-dir ./model
+# Install mistral-common (required for Voxtral)
+pip install mistral-common
+```
+
+### Model Usage
+
+The service uses HuggingFace Transformers to load the Voxtral model automatically:
+
+```bash
+# Default: downloads model from HuggingFace
+python server.py
+
+# Or use local ONNX model
+export VOXTRAL_USE_ONNX=true
+export VOXTRAL_ONNX_PATH=./model
+python server.py
 ```
 
 ### Docker Build
@@ -144,18 +159,37 @@ Metrics tracked:
 - Features: 128 mel bins
 - Chunk size: 480ms = 7680 samples for streaming
 
-### ONNX Runtime Configuration
+### Model Configuration
 ```python
-session = ort.InferenceSession(
-    "model.onnx",
-    providers=['CUDAExecutionProvider', 'CPUExecutionProvider']
+from voxtral_onnx import VoxtralRealtime
+
+# Load from HuggingFace
+model = VoxtralRealtime(
+    model_id="mistralai/Voxtral-Mini-4B-Realtime-2602",
+    device="cuda:0",
+    transcription_delay_ms=480  # Sweet spot for accuracy/latency
+)
+
+# Or use local ONNX model
+model = VoxtralRealtime(
+    use_onnx=True,
+    onnx_model_path="./model",
+    device="cuda:0"
 )
 ```
 
 ### DGX Spark Optimizations
 - Unified memory architecture eliminates GPU-CPU transfer overhead
 - 128GB memory allows full model loading without memory pressure
-- CUDA graphs available for repeated inference patterns
+- Use bfloat16 for optimal GPU inference
+- Set temperature=0.0 for best transcription quality
+
+## Environment Variables
+
+- `VOXTRAL_MODEL_ID`: HuggingFace model ID (default: mistralai/Voxtral-Mini-4B-Realtime-2602)
+- `VOXTRAL_DEVICE`: Device for inference (default: cuda:0)
+- `VOXTRAL_USE_ONNX`: Use local ONNX model (default: false)
+- `VOXTRAL_ONNX_PATH`: Path to ONNX model directory (default: ./model)
 
 ## References
 
@@ -166,10 +200,12 @@ session = ort.InferenceSession(
 ## Status
 
 - [x] FastAPI server implementation
-- [x] ONNX model wrapper
+- [x] Transformers-based model wrapper
 - [x] Docker configuration
 - [x] Benchmark script
 - [x] Test sample generator
-- [ ] Model download (in progress)
+- [x] Model working with transformers library
+- [x] English transcription validated
 - [ ] zh-TW/English validation
-- [ ] Performance optimization for DGX Spark
+- [ ] Performance optimization for DGX Spark (needs GPU)
+- [ ] ONNX model integration (optional)
