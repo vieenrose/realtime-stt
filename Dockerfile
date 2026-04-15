@@ -18,6 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Download model at build time with optional HF token (Transformers model, not ONNX)
 ARG HF_TOKEN
 ENV HF_TOKEN=${HF_TOKEN}
+ENV VOXTRAL_MODEL_ID=/model
 RUN pip install huggingface_hub && \
     hf download mistralai/Voxtral-Mini-4B-Realtime-2602 --local-dir /model --token "$HF_TOKEN"
 
